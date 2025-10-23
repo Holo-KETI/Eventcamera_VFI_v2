@@ -35,6 +35,12 @@ Modify the dataset path in ./losses/DISTS/DISTS_pytorch/DISTS_pt.py (63 row) to 
 $ python run_network.py --param_name traintest_BSERGB_x5AdamwithLPIPS_vali --model_name Expv8_large --model_pretrained <pretrained_model_weight path> --skip_training
 ```
 
+## Block code inference 
+```bash
+python block_all_pipeline.py
+```
+test set : Download Link: [block ver. test set](https://drive.google.com/file/d/1J8QBEyvSqWYVFNizdjSTg67KirDk-BX0/view?usp=sharing) <--- params.validation_config.data_paths
+
 ## Metric (psnr)
 ```bash
 python metric.py --res_root <output_folder_path> --gt_root ./dataset/bs_ergb/1_TEST
