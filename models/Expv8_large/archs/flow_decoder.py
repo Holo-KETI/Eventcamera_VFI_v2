@@ -57,97 +57,78 @@ class ResBlockIF(nn.Module):
 		x_res1 = self.conv_block1(x_res)+x_res
 		return x_res1
 
-
-class BackwardWarp_onnx(torch.nn.Module):
+class BackwardWarp_onnx(nn.Module):
 	def __init__(self):
 		super(BackwardWarp_onnx, self).__init__()
 
 	def forward(self, img, flow, H, W):
-
 		u = flow[:, 0, :, :]
 		v = flow[:, 1, :, :]
 
 		grid_x = torch.arange(W, dtype=torch.float32, device=flow.device).unsqueeze(0).unsqueeze(0).expand(1, H, W)
 		grid_y = torch.arange(H, dtype=torch.float32, device=flow.device).unsqueeze(0).unsqueeze(2).expand(1, H, W)
 
-
 		x = grid_x + u
 		y = grid_y + v
 
-        # align_corners=True
+		# normalize to [-1, 1]
 		x = 2 * (x / (W - 1) - 0.5)
 		y = 2 * (y / (H - 1) - 0.5)
 
-		grid = torch.stack((x, y), dim=3)  # [B, H, W, 2]
-	
-		return bilinear_grid_sample_onnx(img, grid,H, W, align_corners=True)
+		# grid = torch.stack((x, y), dim=3)
+		return bilinear_grid_sample_onnx(img, x,y, H, W)
 
 
+def bilinear_grid_sample_onnx(img, x,y, H, W):
+	_, C, _, _ = img.shape
 
-def bilinear_grid_sample_onnx(img, grid, H,W,align_corners=True):
 
-	# B, C, H, W = img.shape
-	x = grid[..., 0]
-	y = grid[..., 1]
-
-	x = ((x + 1) * 0.5) * (W - 1)	
+	x = ((x + 1) * 0.5) * (W - 1)
 	y = ((y + 1) * 0.5) * (H - 1)
-    
 
-
-    # floor/ceil
 	x0 = torch.floor(x)
 	x1 = x0 + 1
 	y0 = torch.floor(y)
 	y1 = y0 + 1
-    # breakpoint()
-    # mask (zeros padding)
-	def valid(ix, iy):
-		return (ix >= 0) & (ix <= W - 1) & (iy >= 0) & (iy <= H - 1)
 
-
-	m00 = valid(x0, y0)
-	m01 = valid(x0, y1)
-	m10 = valid(x1, y0)
-	m11 = valid(x1, y1)
-
-    # clamp for gather
 	x0c = x0.clamp(0, W - 1).long()
 	x1c = x1.clamp(0, W - 1).long()
 	y0c = y0.clamp(0, H - 1).long()
 	y1c = y1.clamp(0, H - 1).long()
 
-    # weights
-	wa = (x1 - x) * (y1 - y)  # top-left
-	wb = (x1 - x) * (y - y0)  # bottom-left
-	wc = (x - x0) * (y1 - y)  # top-right
-	wd = (x - x0) * (y - y0)  # bottom-right
+	# weights
+	wa = (x1 - x) * (y1 - y)
+	wb = (x1 - x) * (y - y0)
+	wc = (x - x0) * (y1 - y)
+	wd = (x - x0) * (y - y0)
 
-	wa = wa * m00.to(wa.dtype)
-	wb = wb * m01.to(wb.dtype)
-	wc = wc * m10.to(wc.dtype)
-	wd = wd * m11.to(wd.dtype)
+	# (B, C, H, W) → (B, H, W, C)
+	img_hwcn = img.permute(0, 2, 3, 1)
 
-	img_hwcn = img.permute(0, 2, 3, 1)  # (B, H, W, C)
-	
-	B_idx = torch.arange(1, device=img.device).unsqueeze(0).unsqueeze(0).expand(-1, x.shape[1], x.shape[2])
+	img_flat = img_hwcn.reshape(1, -1, C)
 
+	def gather_pixel(ix, iy):
+		index = (iy * W + ix).reshape(1, -1, 1)		
+		return torch.gather(img_flat, 1, index.expand(1, -1, C))
 
+	Ia = gather_pixel(x0c, y0c)
+	Ib = gather_pixel(x0c, y1c)
+	Ic = gather_pixel(x1c, y0c)
+	Id = gather_pixel(x1c, y1c)
 
-	Ia = img_hwcn[B_idx, y0c, x0c]  # (B, H, W, C)
-	Ib = img_hwcn[B_idx, y1c, x0c]
-	Ic = img_hwcn[B_idx, y0c, x1c]
-	Id = img_hwcn[B_idx, y1c, x1c]
+	# weight shape 맞추기
+	wa = wa.reshape(1, -1, 1)
+	wb = wb.reshape(1, -1, 1)
+	wc = wc.reshape(1, -1, 1)
+	wd = wd.reshape(1, -1, 1)
 
-	wa = wa.unsqueeze(-1)
-	wb = wb.unsqueeze(-1)
-	wc = wc.unsqueeze(-1)
-	wd = wd.unsqueeze(-1)
+	out = Ia * wa + Ib * wb + Ic * wc + Id * wd  # (B, H*W, C)
 
-	out = Ia * wa + Ib * wb + Ic * wc + Id * wd  # (B, H, W, C)
-	
-	return out.permute(0, 3, 1, 2)  # (B, C, H, W)
+	out = out.reshape(1, H, W, C)
 
+	out = out.permute(0, 3, 1, 2)
+
+	return out
 
 class FlowDecoder(nn.Module):
 	def __init__(self, in_channel, base_channel, conv_base_channel):
